@@ -1,5 +1,5 @@
 ﻿import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { useParams } from "react-router-dom";
+import { useNavigate, useParams } from "react-router-dom";
 import { io } from "socket.io-client";
 import GlassCard from "../components/GlassCard";
 import GlowButton from "../components/GlowButton";
@@ -9,7 +9,15 @@ import SectionHeader from "../components/SectionHeader";
 
 export default function AuctionDetail() {
   const { id } = useParams();
-  const role = localStorage.getItem("role");
+  const navigate = useNavigate();
+  const storedUser = (() => {
+    try {
+      return JSON.parse(localStorage.getItem("user") || "{}");
+    } catch {
+      return {};
+    }
+  })();
+  const role = storedUser?.role || localStorage.getItem("role");
   const socket = useMemo(() => io("http://localhost:5000"), []);
 
   const [auction, setAuction] = useState(null);
@@ -28,14 +36,29 @@ export default function AuctionDetail() {
   const [tickRemaining, setTickRemaining] = useState(null);
   const [overpriceAlert, setOverpriceAlert] = useState(null);
   const [overrideLock, setOverrideLock] = useState(false);
+  const [showBalanceModal, setShowBalanceModal] = useState(false);
+  const [shortfallAmount, setShortfallAmount] = useState(0);
+  const [isRecalculatingProjection, setIsRecalculatingProjection] = useState(false);
+  const [displayProjectedPrice, setDisplayProjectedPrice] = useState(null);
+  const [projectionDirection, setProjectionDirection] = useState(null);
 
   const previousPrice = useRef(null);
+  const previousProjectedRef = useRef(null);
+  const projectionAnimationRef = useRef(null);
   const newestBidId = bidHistory?.[0]?._id;
 
   const formatCurrency = (value) =>
     value !== undefined && value !== null && !Number.isNaN(Number(value))
       ? `₹${Number(value).toLocaleString()}`
       : "-";
+
+  function getRelativeTime(dateString) {
+    const seconds = Math.floor((Date.now() - new Date(dateString)) / 1000);
+    if (seconds < 5) return "Just now";
+    if (seconds < 60) return `${seconds}s ago`;
+    if (seconds < 3600) return `${Math.floor(seconds / 60)}m ago`;
+    return new Date(dateString).toLocaleTimeString();
+  }
 
   const getCountdown = (endTime) => {
     const diff = Math.max(0, new Date(endTime).getTime() - now);
@@ -50,41 +73,56 @@ export default function AuctionDetail() {
     try {
       setLoadingAI(true);
       const token = localStorage.getItem("token");
+      const isBidder = role === "bidder";
 
-      const [auctionRes, bidRes, aiRes, autoRes] = await Promise.all([
+      const baseRequests = [
         fetch(`http://localhost:5000/api/auctions/${id}`, {
           headers: { Authorization: `Bearer ${token}` }
         }),
         fetch(`http://localhost:5000/api/auctions/bids/${id}`, {
           headers: { Authorization: `Bearer ${token}` }
-        }),
-        fetch(`http://localhost:5000/api/auctions/suggest/${id}`, {
-          headers: { Authorization: `Bearer ${token}` }
-        }),
-        fetch(`http://localhost:5000/api/auctions/autobid/${id}`, {
-          headers: { Authorization: `Bearer ${token}` }
         })
-      ]);
+      ];
+
+      const bidderOnlyRequests = isBidder
+        ? [
+            fetch(`http://localhost:5000/api/auctions/suggest/${id}`, {
+              headers: { Authorization: `Bearer ${token}` }
+            }),
+            fetch(`http://localhost:5000/api/auctions/autobid/${id}`, {
+              headers: { Authorization: `Bearer ${token}` }
+            })
+          ]
+        : [];
+
+      const responses = await Promise.all([...baseRequests, ...bidderOnlyRequests]);
+      const [auctionRes, bidRes, aiRes, autoRes] = responses;
 
       const auctionData = await auctionRes.json();
       const bidData = await bidRes.json();
-      const aiDataRes = await aiRes.json();
-      const autoData = await autoRes.json();
 
       if (auctionData.success) {
         setAuction(auctionData.auction);
         previousPrice.current = auctionData.auction.currentPrice;
       }
       if (bidData.success) setBidHistory(bidData.bids);
-      if (aiDataRes.success) setAiData(aiDataRes.aiPrediction);
-      if (autoData.success) setAutoBidInfo(autoData.autoBid);
+
+      if (isBidder) {
+        const aiDataRes = await aiRes.json();
+        const autoData = await autoRes.json();
+        if (aiDataRes.success) setAiData(aiDataRes.aiPrediction);
+        if (autoData.success) setAutoBidInfo(autoData.autoBid);
+      } else {
+        setAiData(null);
+        setAutoBidInfo(null);
+      }
     } catch (err) {
       console.error("Fetch all error:", err);
     } finally {
       setLoadingAI(false);
       setLoading(false);
     }
-  }, [id]);
+  }, [id, role]);
 
   useEffect(() => {
     fetchAll();
@@ -136,6 +174,9 @@ export default function AuctionDetail() {
         return { ...prev, currentPrice: data.newPrice };
       });
 
+      if (role === "bidder") {
+        setIsRecalculatingProjection(true);
+      }
       fetchAll();
     };
 
@@ -156,7 +197,7 @@ export default function AuctionDetail() {
       socket.off("auctionEnded", handleAuctionEnded);
       socket.off("auctionTick", handleAuctionTick);
     };
-  }, [id, fetchAll, socket]);
+  }, [id, fetchAll, role, socket]);
 
   useEffect(() => {
     return () => socket.disconnect();
@@ -165,6 +206,7 @@ export default function AuctionDetail() {
   const placeBid = async (confirmOverride = false) => {
     try {
       const token = localStorage.getItem("token");
+      const numericBidAmount = Number(bidAmount);
       const res = await fetch("http://localhost:5000/api/auctions/bid", {
         method: "POST",
         headers: {
@@ -173,12 +215,21 @@ export default function AuctionDetail() {
         },
         body: JSON.stringify({
           auctionId: id,
-          amount: Number(bidAmount),
+          amount: numericBidAmount,
           confirmOverride
         })
       });
 
       const data = await res.json();
+      const errorMessage = String(data?.message || "");
+      const lowerMessage = errorMessage.toLowerCase();
+      if (!res.ok && (lowerMessage.includes("insufficient") || lowerMessage.includes("balance"))) {
+        const walletBalance = Number(storedUser?.walletBalance || 0);
+        setShortfallAmount(Math.max(0, numericBidAmount - walletBalance));
+        setShowBalanceModal(true);
+        return;
+      }
+
       if (data?.overpriceWarning === true) {
         setExpandedInsights(true);
         setOverpriceAlert(data);
@@ -192,7 +243,15 @@ export default function AuctionDetail() {
       setOverpriceAlert(null);
       setOverWarning(data.overbiddingWarning || false);
       setBidAmount("");
+      setShowBalanceModal(false);
     } catch (err) {
+      const apiMessage = String(err?.response?.data?.message || "").toLowerCase();
+      if (apiMessage.includes("insufficient") || apiMessage.includes("balance")) {
+        const walletBalance = Number(storedUser?.walletBalance || 0);
+        const numericBidAmount = Number(bidAmount);
+        setShortfallAmount(Math.max(0, numericBidAmount - walletBalance));
+        setShowBalanceModal(true);
+      }
       console.error("Bid error:", err);
     }
   };
@@ -235,19 +294,124 @@ export default function AuctionDetail() {
     }
   };
 
-  const aiConfidence = useMemo(
-    () => Math.floor((aiData?.modelResponse?.confidence || 0.78) * 100),
-    [aiData]
-  );
-  const fraudRisk = useMemo(
-    () => Math.floor((aiData?.modelResponse?.fraud_probability || 0.18) * 100),
-    [aiData]
-  );
-  const predictedFinalPrice = aiData?.predictedFinalPrice || aiData?.suggestedBid || auction?.currentPrice || 0;
-  const winningProbability = Math.max(35, Math.min(98, aiConfidence - Math.floor(fraudRisk / 4)));
-  const botStrategy = bidHistory.some((b) => b?.bidder?.role === "bot")
-    ? "Bot pressure detected. Expect incremental counter-bids."
-    : "No bot pressure currently detected.";
+  const projectedFinalPrice = Number(aiData?.predicted_final_price);
+  const winningProbabilityRatio = Number(aiData?.winning_probability_ratio);
+  const fraudProbability = Number(aiData?.fraud_probability);
+  const confidenceScore = Number(aiData?.confidence_score);
+
+  const projectedFinalPriceValue = Number.isFinite(projectedFinalPrice)
+    ? projectedFinalPrice
+    : null;
+  const winningProbabilityPct = Number.isFinite(winningProbabilityRatio)
+    ? winningProbabilityRatio * 100
+    : null;
+  const fraudRiskPct = Number.isFinite(fraudProbability)
+    ? fraudProbability * 100
+    : null;
+  const modelConfidencePct = Number.isFinite(confidenceScore)
+    ? confidenceScore * 100
+    : null;
+  const normalizedConfidencePct =
+    modelConfidencePct === null
+      ? 0
+      : Math.max(0, Math.min(100, modelConfidencePct));
+  const marketGap = projectedFinalPriceValue === null
+    ? null
+    : projectedFinalPriceValue - Number(auction?.currentPrice || 0);
+  const fraudRiskLabel =
+    fraudRiskPct === null
+      ? "-"
+      : fraudRiskPct <= 20
+      ? "Low"
+      : fraudRiskPct <= 50
+      ? "Moderate"
+      : "High";
+
+  useEffect(() => {
+    if (projectionAnimationRef.current) {
+      cancelAnimationFrame(projectionAnimationRef.current);
+      projectionAnimationRef.current = null;
+    }
+
+    if (projectedFinalPriceValue === null) {
+      setDisplayProjectedPrice(null);
+      setProjectionDirection(null);
+      previousProjectedRef.current = null;
+      return;
+    }
+
+    const previousProjected = previousProjectedRef.current;
+    if (previousProjected === null) {
+      setDisplayProjectedPrice(projectedFinalPriceValue);
+      setProjectionDirection(null);
+      previousProjectedRef.current = projectedFinalPriceValue;
+      return;
+    }
+
+    if (previousProjected === projectedFinalPriceValue) {
+      setDisplayProjectedPrice(projectedFinalPriceValue);
+      setProjectionDirection(null);
+      previousProjectedRef.current = projectedFinalPriceValue;
+      return;
+    }
+
+    setProjectionDirection(projectedFinalPriceValue > previousProjected ? "up" : "down");
+    const startValue = previousProjected;
+    const targetValue = projectedFinalPriceValue;
+    const durationMs = 300;
+    const startTime = performance.now();
+
+    const animate = (nowMs) => {
+      const progress = Math.min((nowMs - startTime) / durationMs, 1);
+      const nextValue = startValue + (targetValue - startValue) * progress;
+      setDisplayProjectedPrice(nextValue);
+
+      if (progress < 1) {
+        projectionAnimationRef.current = requestAnimationFrame(animate);
+      } else {
+        previousProjectedRef.current = targetValue;
+      }
+    };
+
+    projectionAnimationRef.current = requestAnimationFrame(animate);
+
+    return () => {
+      if (projectionAnimationRef.current) {
+        cancelAnimationFrame(projectionAnimationRef.current);
+        projectionAnimationRef.current = null;
+      }
+    };
+  }, [projectedFinalPriceValue]);
+
+  useEffect(() => {
+    if (!isRecalculatingProjection) return;
+    if (projectedFinalPriceValue === null && loadingAI) return;
+    setIsRecalculatingProjection(false);
+  }, [isRecalculatingProjection, projectedFinalPriceValue, loadingAI]);
+  const sellerProjectedPrice = projectedFinalPriceValue;
+  const sellerRangeMin =
+    Number.isFinite(sellerProjectedPrice) && sellerProjectedPrice > 0
+      ? sellerProjectedPrice * 0.95
+      : null;
+  const sellerRangeMax =
+    Number.isFinite(sellerProjectedPrice) && sellerProjectedPrice > 0
+      ? sellerProjectedPrice * 1.05
+      : null;
+  const growthPct = (() => {
+    const start = Number(auction?.startingPrice || 0);
+    const current = Number(auction?.currentPrice || 0);
+    if (!Number.isFinite(start) || start <= 0 || !Number.isFinite(current)) return null;
+    return ((current - start) / start) * 100;
+  })();
+  const uniqueParticipants = new Set(
+    (bidHistory || []).map((bid) => bid?.bidder?._id || bid?.bidder?.customerId).filter(Boolean)
+  ).size;
+  const recentBidCount = (bidHistory || []).filter((bid) => {
+    const ts = new Date(bid?.createdAt || 0).getTime();
+    return Number.isFinite(ts) && Date.now() - ts <= 10 * 60 * 1000;
+  }).length;
+  const momentumLabel =
+    recentBidCount > 5 ? "High Activity" : recentBidCount >= 2 ? "Moderate Activity" : "Low Activity";
 
   if (loading || !auction) {
     return <GlassCard className="p-8 text-slate-300">Loading auction data...</GlassCard>;
@@ -384,36 +548,113 @@ export default function AuctionDetail() {
           )}
         </GlassCard>
 
-        <GlassCard className="p-6" hover={false}>
-          <div className="flex items-center justify-between">
-            <h3 className="text-lg font-semibold">AI Insight</h3>
-            <GlowButton variant="ghost" onClick={() => setExpandedInsights((prev) => !prev)}>
-              {expandedInsights ? "Collapse" : "Expand"}
-            </GlowButton>
-          </div>
-
-          {loadingAI ? (
-            <p className="mt-4 text-sm text-slate-300">{typedText}</p>
-          ) : expandedInsights ? (
-            <div className="mt-4 grid gap-4 md:grid-cols-2">
-              <InsightTile title="Predicted Final Price" value={formatCurrency(predictedFinalPrice)} />
-              <InsightTile title="Winning Probability" value={`${winningProbability}%`} />
-              <InsightTile title="Fraud Risk" value={`${fraudRisk}%`} />
-              <InsightTile title="Bot Strategy" value={botStrategy} />
-              <div className="rounded-xl border border-white/10 bg-[#0F172A]/60 p-4 md:col-span-2">
-                <p className="text-sm text-slate-400">Model Confidence</p>
-                <ConfidenceBar value={aiConfidence} className="mt-2" />
-                <p className="mt-2 text-sm">{aiConfidence}%</p>
-              </div>
+        {isSeller ? (
+          <GlassCard className="p-6" hover={false}>
+            <div className="flex items-center justify-between">
+              <h3 className="text-lg font-semibold">Seller Market Intelligence</h3>
             </div>
-          ) : null}
-        </GlassCard>
+            {loadingAI ? (
+              <p className="mt-4 text-sm text-slate-300">{typedText}</p>
+            ) : (
+              <div className="mt-4 grid gap-4 md:grid-cols-2">
+                <InsightTile
+                  title="Expected Closing Range"
+                  value={
+                    sellerRangeMin !== null && sellerRangeMax !== null
+                      ? `${formatCurrency(sellerRangeMin)} - ${formatCurrency(sellerRangeMax)}`
+                      : "Projection temporarily unavailable"
+                  }
+                />
+                <InsightTile
+                  title="Price Growth Since Start"
+                  value={growthPct === null ? "-" : `${growthPct >= 0 ? "+" : ""}${growthPct.toFixed(2)}% since launch`}
+                />
+                <InsightTile title="Active Participants" value={`Active Participants: ${uniqueParticipants}`} />
+                <InsightTile title="Bid Momentum Indicator" value={momentumLabel} />
+                <div className="rounded-xl border border-white/10 bg-[#0F172A]/60 p-4 md:col-span-2">
+                  <p className="text-sm text-slate-400">Projection Confidence</p>
+                  <ConfidenceBar value={normalizedConfidencePct} className="mt-2" />
+                  <p className="mt-2 text-sm">
+                    {modelConfidencePct === null ? "-" : `${Math.round(modelConfidencePct)}%`}
+                  </p>
+                </div>
+                <InsightTile
+                  title="Integrity Risk"
+                  value={fraudRiskPct === null ? "-" : `${Math.round(fraudRiskPct)}%`}
+                />
+              </div>
+            )}
+          </GlassCard>
+        ) : (
+          <GlassCard className="p-6" hover={false}>
+            <div className="flex items-center justify-between">
+              <h3 className="text-lg font-semibold">AI MARKET PROJECTION</h3>
+              <GlowButton variant="ghost" onClick={() => setExpandedInsights((prev) => !prev)}>
+                {expandedInsights ? "Collapse" : "Expand"}
+              </GlowButton>
+            </div>
+
+            {loadingAI ? (
+              <p className="mt-4 text-sm text-slate-300">{typedText}</p>
+            ) : expandedInsights ? (
+              <div className="mt-4 rounded-xl border border-white/10 bg-[#0F172A]/60 p-5">
+                <div className="mb-4 border-b border-white/10 pb-4">
+                  <p className="text-xs tracking-wide text-slate-400">Projected Final Price</p>
+                  <div className="mt-2 flex items-center gap-2">
+                    <p className="text-3xl font-semibold">
+                      {displayProjectedPrice === null ? "-" : formatCurrency(displayProjectedPrice)}
+                    </p>
+                    {projectionDirection === "up" ? <span className="text-lg">▲</span> : null}
+                    {projectionDirection === "down" ? <span className="text-lg">▼</span> : null}
+                  </div>
+                </div>
+
+                <div className="space-y-3 text-sm">
+                  <div className="flex items-center justify-between">
+                    <span className="text-slate-400">Market Gap</span>
+                    <span>
+                      {marketGap === null
+                        ? "-"
+                        : `${marketGap >= 0 ? "+" : "-"}${formatCurrency(Math.abs(marketGap))}`}
+                    </span>
+                  </div>
+
+                  <div className="flex items-center justify-between">
+                    <span className="text-slate-400">Winning Probability</span>
+                    <span>
+                      {winningProbabilityPct === null ? "-" : `${Math.round(winningProbabilityPct)}%`}
+                    </span>
+                  </div>
+
+                  <div className="flex items-center justify-between">
+                    <span className="text-slate-400">Fraud Risk</span>
+                    <span>
+                      {fraudRiskPct === null ? "-" : `${Math.round(fraudRiskPct)}% (${fraudRiskLabel})`}
+                    </span>
+                  </div>
+                </div>
+
+                <div className="mt-4 border-t border-white/10 pt-4">
+                  <p className="text-sm text-slate-400">Model Confidence</p>
+                  <ConfidenceBar value={normalizedConfidencePct} className="mt-2" />
+                  <p className="mt-2 text-sm">
+                    {modelConfidencePct === null ? "-" : `${Math.round(modelConfidencePct)}%`}
+                  </p>
+                </div>
+
+                {isRecalculatingProjection ? (
+                  <p className="mt-4 text-xs text-slate-300">Recalculating projection...</p>
+                ) : null}
+              </div>
+            ) : null}
+          </GlassCard>
+        )}
       </div>
 
       <GlassCard className="h-fit p-5" hover={false}>
         <h3 className="text-lg font-semibold">Live Bid History</h3>
         <p className="mt-1 text-xs text-slate-400">BG customer IDs only</p>
-        <div className="mt-4 max-h-[76vh] space-y-2 overflow-y-auto pr-1">
+        <div className="mt-4 max-h-[76vh] space-y-3 overflow-y-auto pr-1">
           {bidHistory?.length > 0 ? (
             bidHistory.map((bid) => (
               <div
@@ -424,9 +665,16 @@ export default function AuctionDetail() {
                     : "border-white/10 bg-[#0F172A]/65"
                 }`}
               >
-                <p>
-                  {bid?.bidder?.role === "bot" ? "BOT " : ""}
-                  {bid?.bidder?.customerId || "BG------"} ↑ {formatCurrency(bid?.amount)}
+                <div className="flex items-start justify-between gap-2">
+                  <p>
+                    {bid?.bidder?.role === "bot" ? "BOT " : ""}
+                    {bid?.bidder?.customerId || "BG------"}
+                  </p>
+                  <p className="font-semibold">{formatCurrency(bid?.amount)}</p>
+                </div>
+                <p className="mt-1 text-xs text-slate-400">
+                  {bid?.createdAt ? new Date(bid.createdAt).toLocaleTimeString() : "-"} •{" "}
+                  {bid?.createdAt ? getRelativeTime(bid.createdAt) : "-"}
                 </p>
               </div>
             ))
@@ -438,6 +686,36 @@ export default function AuctionDetail() {
           <HeatGauge value={Math.min(100, bidHistory.length * 8)} label="Battle Intensity" />
         </div>
       </GlassCard>
+
+      {showBalanceModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60">
+          <div className="w-96 rounded-xl bg-gray-900 p-6 shadow-xl">
+            <h2 className="mb-3 text-xl font-semibold text-red-400">
+              Insufficient Wallet Balance
+            </h2>
+            <p className="mb-2 text-gray-300">
+              Your current balance is ₹{Number(storedUser?.walletBalance || 0).toLocaleString()}
+            </p>
+            <p className="mb-4 text-gray-300">
+              You need ₹{Number(shortfallAmount || 0).toLocaleString()} more to place this bid.
+            </p>
+            <div className="flex justify-end gap-3">
+              <button
+                onClick={() => setShowBalanceModal(false)}
+                className="rounded-lg bg-gray-700 px-4 py-2"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={() => navigate("/wallet")}
+                className="rounded-lg bg-gradient-to-r from-purple-500 to-pink-500 px-4 py-2"
+              >
+                Add Funds
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

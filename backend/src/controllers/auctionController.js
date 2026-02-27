@@ -64,6 +64,29 @@ export const createAuction = async (req, res) => {
     };
 
     const { title, description, startingPrice, endTime, reservePrice, category, productName } = req.body;
+    const numericStartingPrice = Number(startingPrice);
+    const parsedEndTime = new Date(endTime);
+
+    if (!Number.isFinite(numericStartingPrice) || numericStartingPrice <= 0) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid starting price"
+      });
+    }
+
+    if (!endTime || Number.isNaN(parsedEndTime.getTime())) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid end time"
+      });
+    }
+
+    if (parsedEndTime <= new Date()) {
+      return res.status(400).json({
+        success: false,
+        message: "End time must be in the future"
+      });
+    }
 
     if (!categoryMap[category] || !categoryMap[category].includes(productName)) {
       return res.status(400).json({
@@ -77,13 +100,14 @@ export const createAuction = async (req, res) => {
       description,
       category,
       productName,
-      startingPrice,
-      currentPrice: startingPrice,
-      endTime,
+      startingPrice: numericStartingPrice,
+      currentPrice: numericStartingPrice,
+      endTime: parsedEndTime,
       reservePrice: reservePrice || null,
       seller: req.user._id,
       image: req.file ? `/images/${req.file.filename}` : null,
-      status: "live"
+      status: "live",
+      isSuspicious: false
     });
 
     return res.status(201).json({
@@ -100,13 +124,18 @@ export const createAuction = async (req, res) => {
 
 export const getLiveAuctions = async (req, res) => {
   try {
+    const now = new Date();
+
     if (req.query.seller === "currentUser") {
       await closeExpiredAuctions({ seller: req.user._id });
     } else {
       await closeExpiredAuctions();
     }
 
-    const query = req.query.seller === "currentUser" ? { seller: req.user._id } : { status: "live" };
+    const query =
+      req.query.seller === "currentUser"
+        ? { seller: req.user._id }
+        : { status: "live", endTime: { $gt: now } };
 
     const auctions = await Auction.find(query)
       .populate("seller", "name")
@@ -540,20 +569,49 @@ export const getSuggestedBid = async (req, res) => {
       return res.status(404).json({ success: false, message: "Auction not found" });
     }
 
-    const bids = await Bid.find({ auction: auction._id }).sort({ createdAt: -1 });
+    const bids = await Bid.find({ auction: auction._id });
+    const now = Date.now();
+    const endTimeMs = new Date(auction.endTime).getTime();
+
+    const durationSeconds = Math.max(
+      1,
+      (endTimeMs - now) / 1000
+    );
+
+    const safeCurrentPrice = Number(auction.currentPrice) || 0;
+    const safeStartingPrice = Number(auction.startingPrice) || 0;
+    const safeTotalBids = Number(bids.length) || 0;
+
+    const uniqueBidders = new Set(
+      bids.map((b) => b.bidder?.toString())
+    ).size;
+
+    const bidVelocity = safeTotalBids / durationSeconds;
+    const priceGrowthRate =
+      (safeCurrentPrice - safeStartingPrice) /
+      Math.max(safeStartingPrice, 1);
 
     const prediction = await getAIPrediction({
-      currentPrice: auction.currentPrice,
-      startingPrice: auction.startingPrice,
-      bidCount: bids.length,
-      timeRemainingMs: Math.max(0, new Date(auction.endTime).getTime() - Date.now())
+      current_price: safeCurrentPrice,
+      starting_price: safeStartingPrice,
+      total_bids: safeTotalBids,
+      unique_bidders: uniqueBidders,
+      duration: durationSeconds,
+      bid_velocity: bidVelocity,
+      price_growth_rate: priceGrowthRate,
+      product_name: auction.productName
     });
 
-    const fallbackBid = auction.currentPrice + 100;
+    if (!prediction) {
+      return res.status(500).json({
+        success: false,
+        message: "Prediction unavailable"
+      });
+    }
 
     return res.status(200).json({
       success: true,
-      suggestedBid: prediction?.suggestedBid ?? fallbackBid,
+      suggestedBid: prediction?.suggestedBid,
       modelResponse: prediction,
       aiPrediction: prediction
     });

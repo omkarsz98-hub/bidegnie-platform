@@ -1,186 +1,200 @@
-from flask import Flask, request, jsonify
-import pandas as pd
-import numpy as np
+﻿from flask import Flask, jsonify, request
 import os
-import joblib
-import random
 
-from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
-from sklearn.model_selection import train_test_split
+import joblib
+import numpy as np
+import pandas as pd
 
 app = Flask("BidGenie ML Service")
 
-DATA_PATH = "src/data/auction_dataset.csv"
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+PRICE_MODEL_PATH = os.path.join(BASE_DIR, "price_model.pkl")
 FRAUD_MODEL_PATH = os.path.join(BASE_DIR, "fraud_model.pkl")
-AUTOBID_MODEL_PATH = os.path.join(BASE_DIR, "autobid_model.pkl")
+CATEGORY_ENCODER_PATH = os.path.join(BASE_DIR, "category_encoder.pkl")
 
-category_map = {
-    "Electronics": 0,
-    "Home Appliances": 1,
-    "Furniture": 2,
-    "Musical Instruments": 3,
-    "Entertainment Systems": 4,
-    "Accessories & Tools": 5
-}
-
-product_map = {
-    "Laptop": 0,
-    "Tablet": 1,
-    "Used Smartphone": 2,
-    "Digital Camera": 3,
-    "LED TV": 4,
-    "Refrigerator": 5,
-    "Washing Machine": 6,
-    "Microwave Oven": 7,
-    "Air Conditioner": 8,
-    "Office Chair": 9,
-    "Electric Guitar": 10,
-    "Home Theater System": 11,
-    "Scooter Helmet": 12,
-    "Power Tools": 13
-}
+NUMERIC_FEATURE_ORDER = [
+    "starting_price",
+    "total_bids",
+    "unique_bidders",
+    "duration",
+    "bid_velocity",
+    "price_growth_rate",
+    "current_price_ratio",
+    "velocity_pressure",
+]
 
 
-def _resolve_dataset_path():
-    candidates = [
-        os.path.join(BASE_DIR, DATA_PATH),
-        os.path.join(BASE_DIR, "..", "backend", "src", "data", "auction_dataset.csv"),
-        os.path.join(os.getcwd(), DATA_PATH),
+PRICE_MODEL = None
+FRAUD_MODEL = None
+CATEGORY_ENCODER = None
+LOAD_ERROR = None
+
+
+def derive_category(product_name: str) -> str:
+    text = str(product_name or "").strip().lower()
+
+    if any(keyword in text for keyword in ["iphone", "samsung", "laptop", "console"]):
+        return "electronics"
+    if any(keyword in text for keyword in ["gold", "silver"]):
+        return "precious"
+    if any(keyword in text for keyword in ["art", "painting"]):
+        return "collectibles"
+    return "other"
+
+
+def load_artifacts() -> None:
+    global PRICE_MODEL, FRAUD_MODEL, CATEGORY_ENCODER, LOAD_ERROR
+
+    missing = [
+        path
+        for path in [PRICE_MODEL_PATH, FRAUD_MODEL_PATH, CATEGORY_ENCODER_PATH]
+        if not os.path.exists(path)
     ]
+    if missing:
+        LOAD_ERROR = "Missing model artifacts: " + ", ".join(os.path.basename(p) for p in missing)
+        return
 
-    for path in candidates:
-        normalized = os.path.abspath(path)
-        if os.path.exists(normalized):
-            return normalized
+    try:
+        PRICE_MODEL = joblib.load(PRICE_MODEL_PATH)
+        FRAUD_MODEL = joblib.load(FRAUD_MODEL_PATH)
+        CATEGORY_ENCODER = joblib.load(CATEGORY_ENCODER_PATH)
+    except Exception as exc:
+        LOAD_ERROR = f"Failed to load model artifacts: {exc}"
 
-    raise FileNotFoundError("auction_dataset.csv not found in expected paths")
+
+def _pick(payload: dict, keys):
+    for key in keys:
+        value = payload.get(key)
+        if value is not None and value != "":
+            return value
+    return None
 
 
-def _prepare_dataset(df):
-    if "current_price" not in df.columns:
-        if "Bid_Amount" in df.columns:
-            df["current_price"] = pd.to_numeric(df["Bid_Amount"], errors="coerce")
-        elif "Start_Price" in df.columns:
-            df["current_price"] = pd.to_numeric(df["Start_Price"], errors="coerce")
+def _to_float(value, field_name: str):
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        raise ValueError(f"Invalid numeric value for '{field_name}'") from None
+
+
+def _extract_feature_values(payload: dict, strict: bool = False):
+    current_raw = _pick(payload, ["current_price", "currentPrice"])
+    starting_raw = _pick(payload, ["starting_price", "startingPrice"])
+
+    if current_raw is None and strict:
+        raise ValueError("Missing required field: current_price")
+
+    current_price = _to_float(current_raw, "current_price") if current_raw is not None else 0.0
+
+    if starting_raw is None:
+        bid_increment_raw = _pick(payload, ["bid_increment", "bidIncrement"])
+        if bid_increment_raw is not None:
+            bid_increment = _to_float(bid_increment_raw, "bid_increment")
+            starting_price = max(0.0, current_price - bid_increment)
+        elif strict:
+            raise ValueError("Missing required field: starting_price")
         else:
-            df["current_price"] = 0
-
-    if "bid_increment" not in df.columns:
-        start_price = pd.to_numeric(df.get("Start_Price", 0), errors="coerce").fillna(0)
-        current_price = pd.to_numeric(df.get("current_price", 0), errors="coerce").fillna(0)
-        df["bid_increment"] = (current_price - start_price).clip(lower=0)
-
-    if "bid_velocity" not in df.columns:
-        if "Lot" in df.columns:
-            df["bid_velocity"] = pd.to_numeric(df["Lot"], errors="coerce").fillna(0)
-        else:
-            df["bid_velocity"] = 0
-
-    if "time_remaining" not in df.columns:
-        if "Auction_End" in df.columns and "Bid_Time" in df.columns:
-            end_time = pd.to_datetime(df["Auction_End"], errors="coerce")
-            bid_time = pd.to_datetime(df["Bid_Time"], errors="coerce")
-            seconds = (end_time - bid_time).dt.total_seconds()
-            df["time_remaining"] = seconds.fillna(0).clip(lower=0)
-        else:
-            df["time_remaining"] = 0
-
-    if "category" in df.columns:
-        df["category_encoded"] = df["category"].map(category_map).fillna(-1)
+            starting_price = current_price
     else:
-        df["category_encoded"] = 0
+        starting_price = _to_float(starting_raw, "starting_price")
 
-    if "productName" in df.columns:
-        df["product_encoded"] = df["productName"].map(product_map).fillna(-1)
+    duration_raw = _pick(payload, ["duration"])
+    if duration_raw is None:
+        time_remaining_ms_raw = _pick(payload, ["timeRemainingMs", "time_remaining_ms"])
+        time_remaining_raw = _pick(payload, ["time_remaining", "timeRemaining"])
+        if time_remaining_ms_raw is not None:
+            duration = _to_float(time_remaining_ms_raw, "timeRemainingMs") / 1000.0
+        elif time_remaining_raw is not None:
+            duration = _to_float(time_remaining_raw, "time_remaining")
+        else:
+            duration = 1.0
     else:
-        df["product_encoded"] = 0
+        duration = _to_float(duration_raw, "duration")
 
-    numeric_cols = [
-        "current_price",
-        "bid_increment",
-        "bid_velocity",
-        "time_remaining",
-        "category_encoded",
-        "product_encoded"
-    ]
-    for col in numeric_cols:
-        df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
+    duration = max(duration, 1.0)
 
-    return df
+    total_bids_raw = _pick(payload, ["total_bids", "totalBids", "bidCount", "bid_count"])
+    unique_bidders_raw = _pick(payload, ["unique_bidders", "uniqueBidders"])
+    bid_velocity_raw = _pick(payload, ["bid_velocity", "bidVelocity"])
 
+    if total_bids_raw is None and bid_velocity_raw is not None:
+        total_bids = _to_float(bid_velocity_raw, "bid_velocity") * duration
+    elif total_bids_raw is None:
+        total_bids = 1.0
+    else:
+        total_bids = _to_float(total_bids_raw, "total_bids")
 
-def train_and_save_models():
-    dataset_path = _resolve_dataset_path()
-    df = pd.read_csv(dataset_path)
-    df = _prepare_dataset(df)
+    if unique_bidders_raw is None:
+        unique_bidders = max(1.0, min(total_bids, 5.0))
+    else:
+        unique_bidders = _to_float(unique_bidders_raw, "unique_bidders")
 
-    # Fraud label generation (temporary heuristic)
-    df["fraud_label"] = np.where(
-        (df["bid_increment"] > df["bid_increment"].mean() * 2)
-        & (df["bid_velocity"] > df["bid_velocity"].mean()),
-        1,
-        0,
-    )
+    if bid_velocity_raw is None:
+        bid_velocity = total_bids / max(duration, 1.0)
+    else:
+        bid_velocity = _to_float(bid_velocity_raw, "bid_velocity")
 
-    fraud_features = [
-        "current_price",
-        "bid_increment",
-        "bid_velocity",
-        "time_remaining",
-        "category_encoded",
-        "product_encoded"
-    ]
-    X_fraud = df[fraud_features]
-    y_fraud = df["fraud_label"]
+    growth_raw = _pick(payload, ["price_growth_rate", "priceGrowthRate"])
+    if growth_raw is None:
+        price_growth_rate = (current_price - starting_price) / max(starting_price, 1.0)
+    else:
+        price_growth_rate = _to_float(growth_raw, "price_growth_rate")
 
-    X_train, X_test, y_train, y_test = train_test_split(
-        X_fraud, y_fraud, test_size=0.2, random_state=42
-    )
+    current_price_ratio = current_price / max(starting_price, 1.0)
+    velocity_pressure = bid_velocity * price_growth_rate
 
-    fraud_model = RandomForestClassifier(n_estimators=100, random_state=42)
-    fraud_model.fit(X_train, y_train)
-    joblib.dump(fraud_model, FRAUD_MODEL_PATH)
+    product_name = _pick(payload, ["product_name", "productName", "Product_Name"])
 
-    # Autobid regression target
-    df["next_bid"] = df["current_price"] + df["bid_increment"]
-
-    autobid_features = [
-        "current_price",
-        "time_remaining",
-        "bid_velocity",
-        "category_encoded",
-        "product_encoded"
-    ]
-    X_auto = df[autobid_features]
-    y_auto = df["next_bid"]
-
-    X_train_a, X_test_a, y_train_a, y_test_a = train_test_split(
-        X_auto, y_auto, test_size=0.2, random_state=42
-    )
-
-    autobid_model = RandomForestRegressor(n_estimators=100, random_state=42)
-    autobid_model.fit(X_train_a, y_train_a)
-    joblib.dump(autobid_model, AUTOBID_MODEL_PATH)
+    return {
+        "starting_price": starting_price,
+        "current_price": current_price,
+        "total_bids": total_bids,
+        "unique_bidders": unique_bidders,
+        "duration": duration,
+        "bid_velocity": bid_velocity,
+        "price_growth_rate": price_growth_rate,
+        "current_price_ratio": current_price_ratio,
+        "velocity_pressure": velocity_pressure,
+        "product_name": str(product_name or ""),
+    }
 
 
-def load_or_train_models():
-    if not os.path.exists(FRAUD_MODEL_PATH) or not os.path.exists(AUTOBID_MODEL_PATH):
-        train_and_save_models()
+def _build_feature_frame(payload: dict, model, strict: bool = False):
+    values = _extract_feature_values(payload, strict=strict)
 
-    fraud_model = joblib.load(FRAUD_MODEL_PATH)
-    autobid_model = joblib.load(AUTOBID_MODEL_PATH)
+    category = derive_category(values["product_name"])
+    category_input = pd.DataFrame({"category": [category]})
+    encoded = CATEGORY_ENCODER.transform(category_input)
+    category_columns = [f"category_{label}" for label in CATEGORY_ENCODER.categories_[0]]
 
-    # Re-train when persisted models are from an older feature layout.
-    if getattr(fraud_model, "n_features_in_", None) != 6 or getattr(autobid_model, "n_features_in_", None) != 5:
-        train_and_save_models()
-        fraud_model = joblib.load(FRAUD_MODEL_PATH)
-        autobid_model = joblib.load(AUTOBID_MODEL_PATH)
+    feature_map = {
+        key: float(values[key]) for key in NUMERIC_FEATURE_ORDER
+    }
 
-    return fraud_model, autobid_model
+    for idx, column in enumerate(category_columns):
+        feature_map[column] = float(encoded[0][idx])
+
+    model_columns = list(getattr(model, "feature_names_in_", feature_map.keys()))
+    ordered = {column: float(feature_map.get(column, 0.0)) for column in model_columns}
+
+    frame = pd.DataFrame([ordered], columns=model_columns)
+    return frame, values
 
 
-fraud_model, autobid_model = load_or_train_models()
+def _fraud_probability(features: pd.DataFrame) -> float:
+    probabilities = FRAUD_MODEL.predict_proba(features)
+    if probabilities.shape[1] == 1:
+        # Classifier can be trained on a single class in edge-case datasets.
+        single_class = int(FRAUD_MODEL.classes_[0])
+        return float(1.0 if single_class == 1 else 0.0)
+    return float(probabilities[0][1])
+
+
+def _model_error_response():
+    return jsonify({"success": False, "error": LOAD_ERROR or "Model artifacts not loaded"}), 500
+
+
+load_artifacts()
 
 
 @app.route("/")
@@ -190,67 +204,97 @@ def home():
 
 @app.route("/predict", methods=["POST"])
 def predict():
-    data = request.json or {}
+    if LOAD_ERROR or PRICE_MODEL is None or FRAUD_MODEL is None or CATEGORY_ENCODER is None:
+        return _model_error_response()
 
-    # Simple simulated ML logic
-    current_price = float(data.get("current_price", 0))
-    predicted_price = current_price * random.uniform(1.05, 1.20)
-    winning_probability = random.uniform(0.5, 0.9)
+    payload = request.json or {}
 
-    return jsonify({
-        "predicted_price": round(predicted_price, 2),
-        "winning_probability": round(winning_probability, 2)
-    })
+    try:
+        features, values = _build_feature_frame(payload, PRICE_MODEL, strict=True)
+    except ValueError as exc:
+        return jsonify({"success": False, "error": str(exc)}), 400
+
+    predicted_price = float(PRICE_MODEL.predict(features)[0])
+
+    try:
+        fraud_features, _ = _build_feature_frame(payload, FRAUD_MODEL, strict=False)
+        fraud_probability = _fraud_probability(fraud_features)
+    except ValueError:
+        fraud_probability = 0.0
+
+    current_price = float(values["current_price"])
+    confidence_score = 1.0 - abs(predicted_price - current_price) / max(predicted_price, 1.0)
+    confidence_score = float(np.clip(confidence_score, 0.4, 0.95))
+
+    winning_probability_ratio = float(
+        np.clip(current_price / max(predicted_price, 1.0), 0.0, 1.0)
+    )
+
+    return jsonify(
+        {
+            "predicted_final_price": predicted_price,
+            "confidence_score": confidence_score,
+            "fraud_probability": float(fraud_probability),
+            "winning_probability_ratio": winning_probability_ratio,
+            # Backward-compatible aliases
+            "predicted_price": predicted_price,
+            "winning_probability": winning_probability_ratio,
+            "confidence": confidence_score,
+            "suggestedBid": predicted_price,
+        }
+    )
 
 
 @app.route("/predict-fraud", methods=["POST"])
 def predict_fraud():
-    data = request.json or {}
-    category = data.get("category")
-    category_encoded = category_map.get(category, -1)
-    product = data.get("productName")
-    product_encoded = product_map.get(product, -1)
+    if LOAD_ERROR or FRAUD_MODEL is None or CATEGORY_ENCODER is None:
+        return _model_error_response()
 
-    features = pd.DataFrame([{
-        "current_price": float(data.get("current_price", 0)),
-        "bid_increment": float(data.get("bid_increment", 0)),
-        "bid_velocity": float(data.get("bid_velocity", 0)),
-        "time_remaining": float(data.get("time_remaining", 0)),
-        "category_encoded": float(category_encoded),
-        "product_encoded": float(product_encoded)
-    }])
+    payload = request.json or {}
 
-    probability = fraud_model.predict_proba(features)[0][1]
+    try:
+        features, _ = _build_feature_frame(payload, FRAUD_MODEL, strict=False)
+    except ValueError as exc:
+        return jsonify({"success": False, "error": str(exc)}), 400
 
-    return jsonify({
-        "fraud_probability": float(probability)
-    })
+    probability = _fraud_probability(features)
+    return jsonify({"fraud_probability": float(probability)})
 
 
 @app.route("/predict-autobid", methods=["POST"])
 def predict_autobid():
-    data = request.json or {}
-    category = data.get("category")
-    category_encoded = category_map.get(category, -1)
-    product = data.get("productName")
-    product_encoded = product_map.get(product, -1)
+    if LOAD_ERROR or PRICE_MODEL is None or CATEGORY_ENCODER is None:
+        return _model_error_response()
 
-    features = pd.DataFrame([{
-        "current_price": float(data.get("current_price", 0)),
-        "time_remaining": float(data.get("time_remaining", 0)),
-        "bid_velocity": float(data.get("bid_velocity", 0)),
-        "category_encoded": float(category_encoded),
-        "product_encoded": float(product_encoded)
-    }])
+    payload = request.json or {}
 
-    predicted_bid = autobid_model.predict(features)[0]
+    try:
+        features, values = _build_feature_frame(payload, PRICE_MODEL, strict=False)
+    except ValueError as exc:
+        return jsonify({"success": False, "error": str(exc)}), 400
 
-    recommended = min(predicted_bid, data.get("budget", predicted_bid))
+    predicted_price = float(PRICE_MODEL.predict(features)[0])
+    safe_bid = float(predicted_price * 0.97)
 
-    return jsonify({
-        "recommended_bid": float(recommended),
-        "confidence": 0.9
-    })
+    budget_raw = _pick(payload, ["budget", "maxBudget"])
+    if budget_raw is not None:
+        try:
+            budget = _to_float(budget_raw, "budget")
+            safe_bid = min(safe_bid, budget)
+        except ValueError:
+            pass
+
+    current_price = float(values["current_price"])
+    confidence_score = 1.0 - abs(predicted_price - current_price) / max(predicted_price, 1.0)
+    confidence_score = float(np.clip(confidence_score, 0.4, 0.95))
+
+    return jsonify(
+        {
+            "safe_bid": safe_bid,
+            "recommended_bid": safe_bid,
+            "confidence": confidence_score,
+        }
+    )
 
 
 if __name__ == "__main__":
