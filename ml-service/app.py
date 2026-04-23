@@ -1,4 +1,4 @@
-﻿from flask import Flask, jsonify, request
+from flask import Flask, jsonify, request
 import os
 
 import joblib
@@ -214,7 +214,7 @@ def predict():
     except ValueError as exc:
         return jsonify({"success": False, "error": str(exc)}), 400
 
-    predicted_price = float(PRICE_MODEL.predict(features)[0])
+    raw_predicted = float(PRICE_MODEL.predict(features)[0])
 
     try:
         fraud_features, _ = _build_feature_frame(payload, FRAUD_MODEL, strict=False)
@@ -223,6 +223,11 @@ def predict():
         fraud_probability = 0.0
 
     current_price = float(values["current_price"])
+    
+    # Logically, the final settled price mathematically cannot be lower than the current price.
+    # If raw prediction is lower, the item is overvalued, but we must bound the projection.
+    predicted_price = max(raw_predicted, current_price * 1.02)
+    
     confidence_score = 1.0 - abs(predicted_price - current_price) / max(predicted_price, 1.0)
     confidence_score = float(np.clip(confidence_score, 0.4, 0.95))
 
@@ -273,8 +278,13 @@ def predict_autobid():
     except ValueError as exc:
         return jsonify({"success": False, "error": str(exc)}), 400
 
-    predicted_price = float(PRICE_MODEL.predict(features)[0])
+    raw_predicted = float(PRICE_MODEL.predict(features)[0])
+    current_price = float(values["current_price"])
+    
+    # Ensure logical price advancement bounds for autobidding
+    predicted_price = max(raw_predicted, current_price * 1.02)
     safe_bid = float(predicted_price * 0.97)
+    safe_bid = max(safe_bid, current_price + 50) # Maintain minimum viable increment
 
     budget_raw = _pick(payload, ["budget", "maxBudget"])
     if budget_raw is not None:
@@ -284,7 +294,6 @@ def predict_autobid():
         except ValueError:
             pass
 
-    current_price = float(values["current_price"])
     confidence_score = 1.0 - abs(predicted_price - current_price) / max(predicted_price, 1.0)
     confidence_score = float(np.clip(confidence_score, 0.4, 0.95))
 

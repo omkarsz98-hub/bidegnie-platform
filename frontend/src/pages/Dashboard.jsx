@@ -1,4 +1,4 @@
-﻿import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { io } from "socket.io-client";
 import GlassCard from "../components/GlassCard";
 import HeatGauge from "../components/HeatGauge";
@@ -60,7 +60,7 @@ export default function Dashboard() {
     animationRefs.current[key] = requestAnimationFrame(step);
   }, []);
 
-  const fetchStats = useCallback(async () => {
+  const fetchStats = useCallback(async (isInitial = false) => {
     try {
       const token = localStorage.getItem("token");
       const res = await fetch("http://localhost:5000/api/auctions", {
@@ -72,7 +72,22 @@ export default function Dashboard() {
       const auctions = data.auctions || [];
       const activeAuctions = auctions.length;
       const totalValue = auctions.reduce((sum, a) => sum + (a.currentPrice || 0), 0);
-      const totalBids = auctions.length * 3;
+
+      // Fetch all bids across active auctions (capped for performance) to build true telemetry
+      const bidsPromises = auctions.slice(0, 15).map(async (auction) => {
+        const bRes = await fetch(`http://localhost:5000/api/auctions/bids/${auction._id}`, {
+           headers: { Authorization: `Bearer ${token}` }
+        });
+        const bData = await bRes.json();
+        return (bData?.bids || []).map(b => ({
+           ...b, 
+           auctionName: auction.productName || auction.title || "Unknown Asset"
+        }));
+      });
+      
+      const allBidsArrays = await Promise.all(bidsPromises);
+      const globalBids = allBidsArrays.flat().sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+      const totalBids = globalBids.length;
 
       let trend = "Stable";
       if (totalValue > previousTotalValue.current) trend = "Ascending";
@@ -90,6 +105,19 @@ export default function Dashboard() {
       animateValue("sellerAverage", statsRef.current.sellerAverage, sellerAverage);
       animateValue("sellerAuctionCount", statsRef.current.sellerAuctionCount, sellerAuctions.length);
       setStats((prev) => ({ ...prev, trend }));
+
+      // Pre-fill realistic activity and heat using recent DB history
+      if (isInitial) {
+         setActivityFeed(globalBids.slice(0, 24).map(b => ({
+            message: `${b.bidder?.customerId || "BG------"} placed a bid ₹${Number(b.amount).toLocaleString()} on ${b.auctionName}`,
+            time: new Date(b.createdAt).getTime()
+         })));
+         
+         const cutOff = Date.now() - (2 * 60 * 60 * 1000); // Activity in last 2 hours
+         const recent = globalBids.filter(b => new Date(b.createdAt).getTime() > cutOff);
+         setRecentBids(recent.map(b => new Date(b.createdAt).getTime()));
+      }
+      
     } catch (error) {
       console.error("Dashboard fetch error:", error);
     } finally {
@@ -113,10 +141,10 @@ export default function Dashboard() {
       }
     };
 
-    fetchStats();
+    fetchStats(true);
 
     const handleNewBid = (data) => {
-      fetchStats();
+      fetchStats(false);
       const bidderCustomerId = data?.bidderCustomerId || "BG------";
       const bidValue =
         data?.newPrice !== undefined && data?.newPrice !== null

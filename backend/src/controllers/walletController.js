@@ -43,8 +43,18 @@ export const addFunds = async (req, res) => {
       });
     }
 
-    user.walletBalance += amount;
-    await user.save();
+    const updatedUser = await User.findOneAndUpdate(
+      { _id: req.user._id },
+      { $inc: { walletBalance: amount } },
+      { new: true }
+    );
+
+    if (!updatedUser) {
+      return res.status(500).json({
+        success: false,
+        message: "Failed to update wallet balance."
+      });
+    }
 
     await Transaction.create({
       user: req.user._id,
@@ -55,7 +65,7 @@ export const addFunds = async (req, res) => {
 
     return res.status(200).json({
       success: true,
-      walletBalance: user.walletBalance
+      walletBalance: updatedUser.walletBalance
     });
   } catch (error) {
     return res.status(500).json({

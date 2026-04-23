@@ -114,29 +114,10 @@ const startBackgroundJobs = () => {
   setInterval(async () => {
     try {
       await checkAndEndAuctions({ io, connectedUsers });
-      const auctions = await Auction.find({ status: "live" }).select("_id endTime");
-      const now = new Date();
-
-      auctions.forEach((auction) => {
-        const remaining = Math.max(
-          0,
-          Math.floor((new Date(auction.endTime).getTime() - now.getTime()) / 1000)
-        );
-
-        global.io?.emit("auctionTimer", {
-          auctionId: auction._id,
-          remainingTime: remaining,
-        });
-
-        global.io?.emit("auctionTick", {
-          auctionId: auction._id,
-          timeRemaining: remaining,
-        });
-      });
     } catch (error) {
       console.error("Timer Emit Error:", error.message);
     }
-  }, 1000);
+  }, 15000); // Check for expired auctions every 15 seconds
 };
 
 connectDB()

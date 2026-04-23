@@ -1,4 +1,4 @@
-﻿import { Auction } from "../models/Auction.js";
+import { Auction } from "../models/Auction.js";
 import { Bid } from "../models/Bid.js";
 import { AutoBid } from "../models/AutoBid.js";
 import { User } from "../models/User.js";
@@ -15,7 +15,7 @@ const createWalletTransaction = async (userId, type, amount, description) => {
 
 const refundUser = async (userId, amount) => {
   if (!userId || !amount || amount <= 0) return;
-  await User.collection.updateOne({ _id: userId }, { $inc: { walletBalance: amount } });
+  await User.updateOne({ _id: userId }, { $inc: { walletBalance: amount } });
   await createWalletTransaction(userId, "refund", amount, "Outbid refund");
 };
 
@@ -32,8 +32,9 @@ const settleAuctionPayout = async (auction) => {
   });
   if (existing) return;
 
-  await User.collection.updateOne(
-    { _id: auction.seller },
+  const sellerId = auction.seller?._id || auction.seller;
+  await User.updateOne(
+    { _id: sellerId },
     { $inc: { walletBalance: amount } }
   );
   await createWalletTransaction(auction.seller, "credit", amount, description);
@@ -43,10 +44,15 @@ const closeExpiredAuctions = async (query = {}) => {
   const now = new Date();
   const expiring = await Auction.find({ ...query, status: "live", endTime: { $lte: now } });
 
-  for (const auction of expiring) {
-    auction.status = "ended";
-    await auction.save();
-    await settleAuctionPayout(auction);
+  for (const expAuction of expiring) {
+    const auction = await Auction.findOneAndUpdate(
+      { _id: expAuction._id, status: "live" },
+      { status: "ended" },
+      { new: true }
+    );
+    if (auction) {
+      await settleAuctionPayout(auction);
+    }
   }
 };
 
@@ -160,9 +166,15 @@ export const getAuctionById = async (req, res) => {
     }
 
     if (auction.status === "live" && new Date(auction.endTime) <= new Date()) {
-      auction.status = "ended";
-      await auction.save();
-      await settleAuctionPayout(auction);
+      const updatedAuction = await Auction.findOneAndUpdate(
+        { _id: auction._id, status: "live" },
+        { status: "ended" },
+        { new: true }
+      );
+      if (updatedAuction) {
+        auction.status = "ended";
+        await settleAuctionPayout(updatedAuction);
+      }
     }
 
     const bids = await Bid.find({ auction: auction._id })
@@ -277,7 +289,7 @@ export const placeBid = async (req, res) => {
     await User.updateOne({ _id: req.user._id }, { $inc: { walletBalance: -Number(amount) } });
     await createWalletTransaction(req.user._id, "debit", Number(amount), "Bid placed");
 
-    if (previousWinnerId && previousWinnerId.toString() !== req.user._id.toString()) {
+    if (previousWinnerId) {
       await refundUser(previousWinnerId, previousPrice);
     }
 
@@ -308,101 +320,111 @@ export const placeBid = async (req, res) => {
 
     const suspiciousActivity = recentBids.length >= 8;
 
-    const autoBidders = await AutoBid.find({ auction: auction._id, isActive: true }).populate("bidder", "customerId");
+    // Background Autobid Processing
+    (async () => {
+      try {
+        const autoBidders = await AutoBid.find({ auction: auction._id, isActive: true }).populate("bidder", "customerId");
 
-    for (const auto of autoBidders) {
-      if (auction.isSuspicious === true) {
-        break;
-      }
+        for (const auto of autoBidders) {
+          // Refetch auction to get latest price/winner safely
+          const currentAuction = await Auction.findById(auction._id);
+          if (!currentAuction || currentAuction.status !== "live" || currentAuction.isSuspicious === true) {
+            break;
+          }
 
-      const autoBidderId = auto.bidder?._id?.toString?.() || auto.bidder?.toString?.();
+          const autoBidderId = auto.bidder?._id?.toString?.() || auto.bidder?.toString?.();
 
-      if (!autoBidderId || autoBidderId === auction.winner?.toString()) {
-        continue;
-      }
+          if (!autoBidderId || autoBidderId === currentAuction.winner?.toString()) {
+            continue;
+          }
 
-      const autoTimeRemainingMs = new Date(auction.endTime).getTime() - Date.now();
-      if (autoTimeRemainingMs < 3000) {
-        continue;
-      }
+          const autoTimeRemainingMs = new Date(currentAuction.endTime).getTime() - Date.now();
+          if (autoTimeRemainingMs < 3000) {
+            continue;
+          }
 
-      {
-        const autoResult = await getAutoBidPrediction({
-          current_price: auction.currentPrice,
-          time_remaining: autoTimeRemainingMs / 1000,
-          bid_velocity: 1,
-          budget: auto.maxBudget,
-          category: auction.category,
-          productName: auction.productName
-        });
+          const autoResult = await getAutoBidPrediction({
+            current_price: currentAuction.currentPrice,
+            time_remaining: autoTimeRemainingMs / 1000,
+            bid_velocity: 1,
+            budget: auto.maxBudget,
+            category: currentAuction.category,
+            productName: currentAuction.productName
+          });
 
-        let nextBidAmount;
-        const recommendedBid = Number(autoResult?.recommended_bid);
+          let nextBidAmount;
+          const recommendedBid = Number(autoResult?.recommended_bid);
 
-        if (Number.isFinite(recommendedBid) && recommendedBid > Number(auto.maxBudget)) {
-          continue;
-        }
-
-        if (
-          autoResult &&
-          autoResult.confidence !== undefined &&
-          Number(autoResult.confidence) < 0.6
-        ) {
-          continue;
-        }
-
-        if (autoResult?.recommended_bid) {
-          nextBidAmount = Math.floor(autoResult.recommended_bid);
-        } else {
-          nextBidAmount = auction.currentPrice + 1000;
-        }
-
-        if (nextBidAmount <= auto.maxBudget) {
-          const randomDelay = Math.floor(Math.random() * (2500 - 1000 + 1)) + 1000;
-          await new Promise((resolve) => setTimeout(resolve, randomDelay));
+          if (Number.isFinite(recommendedBid) && recommendedBid > Number(auto.maxBudget)) {
+            continue;
+          }
 
           if (
-            auction.status !== "live" ||
-            new Date().getTime() > new Date(auction.endTime).getTime()
+            autoResult &&
+            autoResult.confidence !== undefined &&
+            Number(autoResult.confidence) < 0.6
           ) {
             continue;
           }
 
-          const autoUser = await User.findById(autoBidderId).select("walletBalance");
-          if (!autoUser || Number(autoUser.walletBalance || 0) < Number(nextBidAmount)) {
-            continue;
+          let predictedBid = autoResult?.recommended_bid ? Math.floor(autoResult.recommended_bid) : 0;
+          let minIncrement = currentAuction.currentPrice + 50; // default safe increment
+          nextBidAmount = Math.max(minIncrement, predictedBid);
+
+          if (nextBidAmount <= auto.maxBudget) {
+            const randomDelay = Math.floor(Math.random() * (2500 - 1000 + 1)) + 1000;
+            await new Promise((resolve) => setTimeout(resolve, randomDelay));
+
+            // Verify auction state again after delay
+            const finalAuction = await Auction.findById(currentAuction._id);
+            if (
+              !finalAuction ||
+              finalAuction.status !== "live" ||
+              new Date().getTime() > new Date(finalAuction.endTime).getTime() ||
+              nextBidAmount <= finalAuction.currentPrice ||
+              finalAuction.winner?.toString() === autoBidderId
+            ) {
+              continue;
+            }
+
+            const autoUser = await User.findById(autoBidderId).select("walletBalance");
+            if (!autoUser || Number(autoUser.walletBalance || 0) < Number(nextBidAmount)) {
+              continue;
+            }
+
+            const autoPreviousWinnerId = finalAuction.winner;
+            const autoPreviousPrice = Number(finalAuction.currentPrice || 0);
+
+            await User.updateOne({ _id: autoBidderId }, { $inc: { walletBalance: -Number(nextBidAmount) } });
+            await createWalletTransaction(autoBidderId, "debit", Number(nextBidAmount), "Bid placed (autobid)");
+
+            if (autoPreviousWinnerId) {
+              await refundUser(autoPreviousWinnerId, autoPreviousPrice);
+            }
+
+            await Bid.create({ auction: finalAuction._id, bidder: autoBidderId, amount: nextBidAmount });
+
+            finalAuction.currentPrice = nextBidAmount;
+            finalAuction.winner = autoBidderId;
+            await finalAuction.save();
+
+            io?.emit("newBid", {
+              auctionId: finalAuction._id,
+              newPrice: nextBidAmount,
+              bidderCustomerId: auto.bidder?.customerId
+            });
+            io?.emit("sellerNotification", {
+              sellerId: finalAuction.seller,
+              auctionId: finalAuction._id,
+              message: "Auto-bid placed on your auction",
+              amount: nextBidAmount
+            });
           }
-
-          const autoPreviousWinnerId = auction.winner;
-          const autoPreviousPrice = Number(auction.currentPrice || 0);
-
-          await User.updateOne({ _id: autoBidderId }, { $inc: { walletBalance: -Number(nextBidAmount) } });
-          await createWalletTransaction(autoBidderId, "debit", Number(nextBidAmount), "Bid placed (autobid)");
-
-          if (autoPreviousWinnerId && autoPreviousWinnerId.toString() !== autoBidderId.toString()) {
-            await refundUser(autoPreviousWinnerId, autoPreviousPrice);
-          }
-
-          await Bid.create({ auction: auction._id, bidder: autoBidderId, amount: nextBidAmount });
-
-          auction.currentPrice = nextBidAmount;
-          auction.winner = autoBidderId;
-          await auction.save();
-
-          io?.emit("newBid", {
-            auctionId: auction._id,
-            newPrice: nextBidAmount,
-            bidderCustomerId: auto.bidder?.customerId
-          });
-          io?.emit("sellerNotification", {
-            sellerId: auction.seller,
-            auctionId: auction._id,
-            message: "Auto-bid placed on your auction",
-            amount: nextBidAmount
-          });
         }
+      } catch (err) {
+        console.error("Autobid processing error:", err.message);
       }
-    }
+    })();
 
     return res.status(201).json({
       success: true,
@@ -638,9 +660,15 @@ export const checkAndEndAuctions = async ({ io = global.io, connectedUsers = nul
 
     if (!liveAuctions.length) return;
 
-    for (const auction of liveAuctions) {
-      auction.status = "ended";
-      await auction.save();
+    for (const liveAuction of liveAuctions) {
+      const auction = await Auction.findOneAndUpdate(
+        { _id: liveAuction._id, status: "live" },
+        { status: "ended" },
+        { new: true }
+      );
+
+      if (!auction) continue;
+
       await settleAuctionPayout(auction);
 
       const winnerUser = auction.winner

@@ -14,6 +14,8 @@ import Analytics from "./pages/Analytics";
 import Settings from "./pages/Settings";
 import SellerDashboard from "./pages/SellerDashboard";
 import Wallet from "./pages/Wallet";
+import Terms from "./pages/Terms";
+import AuctionSystem from "./pages/AuctionSystem";
 
 import ProtectedRoute from "./components/ProtectedRoute";
 import RoleProtectedRoute from "./components/RoleProtectedRoute";
@@ -28,6 +30,8 @@ function App() {
         <Route path="/login" element={<Login />} />
         <Route path="/register" element={<Register />} />
         <Route path="/forgot-password" element={<ForgotPassword />} />
+        <Route path="/terms" element={<Terms />} />
+        <Route path="/auction-system" element={<AuctionSystem />} />
 
         <Route
           element={
