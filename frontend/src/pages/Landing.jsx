@@ -1,7 +1,9 @@
 
 import { useEffect, useState } from "react";
+import { useNavigate } from "react-router-dom";
 
 export default function Landing() {
+  const navigate = useNavigate();
 
   const [timeLeft, setTimeLeft] = useState(12258);
   const [bids, setBids] = useState([]);
@@ -90,8 +92,8 @@ export default function Landing() {
         <nav className="absolute top-0 z-50 w-full px-6 md:px-16 py-6 flex justify-between items-center">
           <div className="text-2xl font-bold">BidGenie</div>
           <div className="flex gap-4">
-            <button className="border border-white/20 px-6 py-2 rounded-xl">Log In</button>
-            <button className="bg-gradient-to-r from-violet-600 to-fuchsia-600 px-6 py-2 rounded-xl">Sign Up</button>
+            <button onClick={() => navigate("/login")} className="border border-white/20 px-6 py-2 rounded-xl transition-all hover:bg-white/5">Log In</button>
+            <button onClick={() => navigate("/register")} className="bg-gradient-to-r from-violet-600 to-fuchsia-600 px-6 py-2 rounded-xl transition-all hover:opacity-90">Sign Up</button>
           </div>
         </nav>
 
@@ -120,7 +122,7 @@ export default function Landing() {
                 Real-time bidding, AI powered AutoBid and powerful insights to help you win every auction.
               </p>
 
-              <button className="px-8 py-4 rounded-2xl bg-gradient-to-r from-violet-600 to-fuchsia-600 shadow-xl">
+              <button onClick={() => navigate("/login")} className="px-8 py-4 rounded-2xl bg-gradient-to-r from-violet-600 to-fuchsia-600 shadow-xl transition-all hover:-translate-y-1 hover:shadow-fuchsia-500/25">
                 Start Bidding →
               </button>
 
