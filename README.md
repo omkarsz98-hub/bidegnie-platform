@@ -8,7 +8,7 @@ BidGenie is a cutting-edge web application designed to revolutionize online auct
 - **🚀 Real-Time Bidding Engine:** Lightning-fast live auction simulations with countdown timers and instant updates.
 - **🤖 AI & Machine Learning:** Intelligent price prediction, market insights, and fraud/risk detection.
 - **⚡ Dynamic Cyberpunk UI:** A visually stunning, non-congested, and immersive user experience featuring a custom HUD and celebration animations for winners.
-- **🛡️ Secure Role Management:** Admin-exclusive task controls and a secure, decoupled task status progression system.
+- **🛡️ Secure Role Management:** Role-based access control ensuring secure transactions and tailored dashboards for buyers and sellers.
 - **📡 Live Telemetry & Notifications:** Global WebSocket-based notification system keeping all participants synchronized.
 - **📈 Advanced Dashboard:** Real-time market insights and telemetry integrated directly into buyer and seller dashboards.
 
@@ -62,9 +62,8 @@ Create `.env` files in both the `backend/` and `ml-service/` directories. Add ne
 
 ## 📖 Usage Guide
 1. **Register/Login:** Create a new account and verify your email.
-2. **Dashboard Access:** Navigate to your tailored dashboard based on your assigned role (Buyer/Seller/Admin).
+2. **Dashboard Access:** Navigate to your tailored dashboard based on your assigned role (Buyer/Seller).
 3. **Live Auctions:** Browse ongoing auctions, view ML-driven price predictions, and place real-time bids.
-4. **Task Management (Admins):** Oversee subtask progression and manage platform health directly from the admin panel.
 
 ## 📸 Screenshots / Demo
 *(Replace placeholders with actual images)*
@@ -77,7 +76,6 @@ Create `.env` files in both the `backend/` and `ml-service/` directories. Add ne
 | `GET` | `/api/auctions` | Retrieve a list of all active auctions |
 | `POST` | `/api/bids` | Place a new bid on an item |
 | `POST` | `/api/ml/predict` | Get price prediction for an item |
-| `GET` | `/api/tasks` | (Admin) Get platform tasks |
 
 ## 📁 Project Structure
 ```text
