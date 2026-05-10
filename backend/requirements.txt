@@ -1,0 +1,2 @@
+# Python dependencies for any backend scripts
+python-dotenv==1.0.1

@@ -1,105 +1,54 @@
-# 🧞‍♂️ BidGenie Platform
-> The next-generation live-data-driven auction experience.
+# BidGenie Platform
 
-## 📝 Description
-BidGenie is a cutting-edge web application designed to revolutionize online auctions. It combines a dynamic, cyberpunk-themed interface with powerful real-time bidding logic, machine learning-driven price predictions, and intelligent risk detection. Built to handle live auction simulations, AI auto-bid engagement, and secure role-based task management, BidGenie provides an unparalleled, immersive auction environment for both buyers and sellers.
+## What is this?
+BidGenie is a smart auction platform that allows users to bid on items in real-time. It features a modern, cyberpunk-themed user interface, an integrated machine learning service for price prediction and fraud detection, and a robust backend for managing real-time websocket connections and database records.
 
-## ✨ Features
-- **🚀 Real-Time Bidding Engine:** Lightning-fast live auction simulations with countdown timers and instant updates.
-- **🤖 AI & Machine Learning:** Intelligent price prediction, market insights, and fraud/risk detection.
-- **⚡ Dynamic Cyberpunk UI:** A visually stunning, non-congested, and immersive user experience featuring a custom HUD and celebration animations for winners.
-- **🛡️ Secure Role Management:** Role-based access control ensuring secure transactions and tailored dashboards for buyers and sellers.
-- **📡 Live Telemetry & Notifications:** Global WebSocket-based notification system keeping all participants synchronized.
-- **📈 Advanced Dashboard:** Real-time market insights and telemetry integrated directly into buyer and seller dashboards.
+## What does it use?
+- **Frontend:** React, Vite, TailwindCSS (Modern, dynamic UI with animations)
+- **Backend:** Node.js, Express, MongoDB, Socket.io (Real-time bidding and REST API)
+- **ML Service:** Python, Flask, scikit-learn (Price prediction & fraud detection models)
 
-## 🛠️ Tech Stack
-- **Frontend:** React.js, WebSockets, Tailwind CSS (Cyberpunk-themed UI)
-- **Backend:** Node.js / Express (or Python) *[Update to match exact backend]*
-- **Machine Learning Service:** Python, Scikit-Learn, Pandas
-- **Database:** MongoDB / PostgreSQL *[Update to match exact DB]*
-- **Tools:** Git, Webpack/Vite, REST APIs
+## How do I run it?
 
-## ⚙️ Installation & Setup Instructions
+### 1. Database Setup
+Make sure you have [MongoDB](https://www.mongodb.com/try/download/community) installed and running on your system.
 
-Follow these steps to run the BidGenie platform locally.
-
-### Prerequisites
-- Node.js & npm (or yarn)
-- Python 3.8+ & pip
-- Database server running locally or accessible via URI
-
-### 1. Clone the Repository
+### 2. Environment Variables
+Copy the example environment file to create your own `.env` file in the root, backend, and frontend directories (as needed):
 ```bash
-git clone https://github.com/yourusername/bidgenie-platform.git
-cd bidgenie-platform
+cp .env.example .env
 ```
+*(Make sure to update the `.env` file with your actual `MONGO_URI` and secrets.)*
 
-### 2. Setup Frontend
+### 3. Start the Backend (Node.js)
+```bash
+cd backend
+npm install
+npm run dev
+```
+*(The backend will run on `http://localhost:5000`)*
+
+### 4. Start the ML Service (Python)
+Open a new terminal window:
+```bash
+cd ml-service
+python -m venv venv
+
+# Activate venv (Windows):
+venv\Scripts\activate
+# Activate venv (Mac/Linux):
+source venv/bin/activate
+
+pip install -r requirements.txt
+python app.py
+```
+*(The ML service will run on `http://localhost:5001`)*
+
+### 5. Start the Frontend (React)
+Open a new terminal window:
 ```bash
 cd frontend
 npm install
 npm run dev
 ```
-
-### 3. Setup Backend
-```bash
-cd ../backend
-# For Node.js
-npm install
-npm run dev
-# For Python: pip install -r requirements.txt && python app.py
-```
-
-### 4. Setup ML Service
-```bash
-cd ../ml-service
-pip install -r requirements.txt
-python app.py
-```
-
-### 5. Environment Variables
-Create `.env` files in both the `backend/` and `ml-service/` directories. Add necessary variables such as `DATABASE_URL`, `JWT_SECRET`, and `PORT`.
-
-## 📖 Usage Guide
-1. **Register/Login:** Create a new account and verify your email.
-2. **Dashboard Access:** Navigate to your tailored dashboard based on your assigned role (Buyer/Seller).
-3. **Live Auctions:** Browse ongoing auctions, view ML-driven price predictions, and place real-time bids.
-
-## 📸 Screenshots / Demo
-*(Replace placeholders with actual images)*
-- ![Landing Page](/path/to/landing-page-screenshot.jpg)
-- ![Live Auction Dashboard](/path/to/auction-screenshot.jpg)
-
-## 🔌 API Endpoints (Example)
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| `GET` | `/api/auctions` | Retrieve a list of all active auctions |
-| `POST` | `/api/bids` | Place a new bid on an item |
-| `POST` | `/api/ml/predict` | Get price prediction for an item |
-
-## 📁 Project Structure
-```text
-bidgenie-platform/
-├── frontend/          # React JS Application (UI, Dashboards, WebSockets)
-├── backend/           # Core API server (Auth, Business Logic, Database interactions)
-└── ml-service/        # Python-based ML APIs (Price Prediction, Fraud Detection)
-```
-
-## 🚀 Future Scope / Improvements
-- Integration of a decentralized payment gateway (Crypto/Stripe).
-- Expansion of AI auto-bidding strategies based on user personas.
-- Mobile application development (React Native/Flutter).
-- Enhanced multi-language support.
-
-## 🤝 Contributing Guidelines
-1. Fork the project.
-2. Create your feature branch (`git checkout -b feature/AmazingFeature`).
-3. Commit your changes (`git commit -m 'Add some AmazingFeature'`).
-4. Push to the branch (`git push origin feature/AmazingFeature`).
-5. Open a Pull Request.
-
-## 👨‍💻 Author / Credits
-- **Your Name / Team** - *Initial work* - [YourGitHubProfile](https://github.com/yourusername)
-
-## 📄 License
-Distributed under the MIT License. See `LICENSE` for more information.
+*(The frontend will be available at `http://localhost:5173`)*
