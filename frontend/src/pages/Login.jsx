@@ -73,6 +73,7 @@ export default function Login() {
                 value={formData.email}
                 onChange={handleChange}
                 required
+                autoComplete="email"
                 className="floating-input w-full rounded-xl border border-white/10 bg-[#0F172A]/80 px-4 pb-3 pt-6 text-slate-100 outline-none transition-all duration-300 focus:border-[#7C3AED]"
               />
               <label className="floating-label">Email</label>
@@ -86,6 +87,7 @@ export default function Login() {
                 value={formData.password}
                 onChange={handleChange}
                 required
+                autoComplete="current-password"
                 className="floating-input w-full rounded-xl border border-white/10 bg-[#0F172A]/80 px-4 pb-3 pt-6 text-slate-100 outline-none transition-all duration-300 focus:border-[#7C3AED]"
               />
               <label className="floating-label">Password</label>

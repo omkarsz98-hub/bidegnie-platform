@@ -679,7 +679,8 @@ export const checkAndEndAuctions = async ({ io = global.io, connectedUsers = nul
         auctionId: auction._id,
         winner: auction.winner,
         winnerCustomerId: winnerUser?.customerId || null,
-        finalPrice: auction.currentPrice
+        finalPrice: auction.currentPrice,
+        auctionTitle: auction.title || auction.productName || "Auction"
       });
 
       emitToConnectedUser(io, connectedUsers, auction.seller?.toString?.() || auction.seller, "sellerAuctionEnded", {

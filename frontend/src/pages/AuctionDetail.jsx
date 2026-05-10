@@ -449,7 +449,7 @@ export default function AuctionDetail() {
             <img
               src={`http://localhost:5000${auction?.image}`}
               alt={auction?.title || "Auction"}
-              className="h-72 w-full object-cover"
+              className="h-72 w-full object-contain bg-[#0F172A]"
             />
           ) : (
             <div className="grid h-72 place-items-center bg-[#0F172A] text-slate-400">No Image</div>

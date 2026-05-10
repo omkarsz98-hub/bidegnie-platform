@@ -164,7 +164,7 @@ export default function CreateAuction() {
               <img
                 src={preview}
                 alt="Preview"
-                className="mt-4 rounded-xl h-48 object-cover w-full"
+                className="mt-4 rounded-xl h-48 object-contain bg-black/30 w-full"
               />
             )}
           </div>

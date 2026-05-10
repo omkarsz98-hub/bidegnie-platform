@@ -1,4 +1,4 @@
-﻿import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { io } from "socket.io-client";
 import GlassCard from "../components/GlassCard";
@@ -168,7 +168,7 @@ export default function LiveAuctions() {
                     <img
                       src={`http://localhost:5000${auction?.image}`}
                       alt={auction?.title || "Auction"}
-                      className="h-44 w-full rounded-xl object-cover"
+                      className="h-44 w-full rounded-xl object-contain bg-[#0F172A]"
                     />
                   ) : (
                     <div className="grid h-44 place-items-center rounded-xl bg-[#0F172A] text-slate-400">No Image</div>

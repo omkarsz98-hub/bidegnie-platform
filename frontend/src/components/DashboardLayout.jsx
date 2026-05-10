@@ -1,6 +1,8 @@
 import { Outlet, useLocation, useNavigate } from "react-router-dom";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
+import { io } from "socket.io-client";
 import Logo from "./Logo";
+import WinnerModal from "./WinnerModal";
 
 const ICONS = {
   dashboard: (
@@ -53,12 +55,14 @@ export default function DashboardLayout({ children }) {
       const user = JSON.parse(localStorage.getItem("user") || "{}");
       return {
         role: user?.role || localStorage.getItem("role") || "",
-        customerId: user?.customerId || localStorage.getItem("customerId") || "BG------"
+        customerId: user?.customerId || localStorage.getItem("customerId") || "BG------",
+        userId: user?._id || localStorage.getItem("userId") || ""
       };
     } catch {
       return {
         role: localStorage.getItem("role") || "",
-        customerId: localStorage.getItem("customerId") || "BG------"
+        customerId: localStorage.getItem("customerId") || "BG------",
+        userId: localStorage.getItem("userId") || ""
       };
     }
   };
@@ -68,6 +72,14 @@ export default function DashboardLayout({ children }) {
   const [customerId] = useState(storedUser.customerId);
   const [collapsed, setCollapsed] = useState(true);
   const [mobileOpen, setMobileOpen] = useState(false);
+  const [modalData, setModalData] = useState(null);
+
+  useEffect(() => {
+    const socket = io("http://localhost:5000");
+    const onAuctionEnded = (data) => setModalData(data);
+    socket.on("auctionEnded", onAuctionEnded);
+    return () => socket.disconnect();
+  }, []);
 
   const items = useMemo(
     () => (role === "seller"
@@ -108,7 +120,9 @@ export default function DashboardLayout({ children }) {
             <path d="M4 7h16M4 12h16M4 17h16" />
           </svg>
         </button>
-        <Logo compact />
+        <button onClick={() => navigate(items[0].path)} className="transition-transform hover:scale-105 outline-none">
+          <Logo compact={false} />
+        </button>
         <div className="rounded-lg border border-white/10 bg-[#0F172A] px-3 py-1.5 text-xs">{customerId}</div>
       </header>
 
@@ -157,6 +171,16 @@ export default function DashboardLayout({ children }) {
       <main className={`px-4 pb-10 pt-24 transition-all duration-300 lg:px-6 lg:pt-8 ${collapsed ? "lg:ml-[72px]" : "lg:ml-[240px]"}`}>
         {children || <Outlet />}
       </main>
+
+      <WinnerModal
+        isOpen={!!modalData}
+        onClose={() => setModalData(null)}
+        role={role}
+        isWinner={modalData?.winner === storedUser.userId}
+        auctionTitle={modalData?.auctionTitle || "Auction Ended"}
+        finalPrice={modalData?.finalPrice}
+        winnerCustomerId={modalData?.winnerCustomerId}
+      />
     </div>
   );
 }
@@ -164,8 +188,10 @@ export default function DashboardLayout({ children }) {
 function SidebarContent({ collapsed, items, customerId, isActive, onNavigate, onLogout, onToggle, mobile = false }) {
   return (
     <div className="flex h-full flex-col">
-      <div className={`border-b border-white/10 px-4 py-4 ${collapsed ? "grid place-items-center" : ""}`}>
-        <Logo compact={collapsed} />
+      <div className="border-b border-white/10 px-4 py-4 flex flex-col items-start">
+        <button onClick={() => onNavigate(items[0].path)} className="transition-transform hover:scale-[1.02] outline-none">
+          <Logo compact={collapsed} />
+        </button>
         {!collapsed ? (
           <p className="mt-2 w-fit rounded-lg border border-white/10 bg-[#0F172A] px-2 py-1 text-xs">{customerId}</p>
         ) : null}

@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Link, useNavigate } from "react-router-dom";
 import { io } from "socket.io-client";
 import GlassCard from "../components/GlassCard";
 import HeatGauge from "../components/HeatGauge";
@@ -8,6 +9,7 @@ import ConfidenceBar from "../components/ConfidenceBar";
 const easeOut = (t) => 1 - Math.pow(1 - t, 3);
 
 export default function Dashboard() {
+  const navigate = useNavigate();
   const socket = useMemo(() => io("http://localhost:5000"), []);
   const role = localStorage.getItem("role");
   const userId = localStorage.getItem("userId");
@@ -22,10 +24,14 @@ export default function Dashboard() {
     sellerRevenue: 0,
     sellerAverage: 0,
     sellerAuctionCount: 0,
+    bidderEngagedAuctions: 0,
+    bidderCommittedValue: 0,
     trend: "Stable"
   });
   const [activityFeed, setActivityFeed] = useState([]);
   const [recentBids, setRecentBids] = useState([]);
+  const [watchlist, setWatchlist] = useState([]);
+  const [aiTelemetry, setAiTelemetry] = useState({ riskScore: 15, confidence: 95 });
   const [loading, setLoading] = useState(true);
   const statsRef = useRef(stats);
 
@@ -73,7 +79,6 @@ export default function Dashboard() {
       const activeAuctions = auctions.length;
       const totalValue = auctions.reduce((sum, a) => sum + (a.currentPrice || 0), 0);
 
-      // Fetch all bids across active auctions (capped for performance) to build true telemetry
       const bidsPromises = auctions.slice(0, 15).map(async (auction) => {
         const bRes = await fetch(`http://localhost:5000/api/auctions/bids/${auction._id}`, {
            headers: { Authorization: `Bearer ${token}` }
@@ -98,24 +103,75 @@ export default function Dashboard() {
       const sellerRevenue = sellerAuctions.reduce((sum, a) => sum + (a.currentPrice || 0), 0);
       const sellerAverage = sellerAuctions.length ? Math.floor(sellerRevenue / sellerAuctions.length) : 0;
 
+      const myBids = globalBids.filter(b => b.bidder?._id === userId || b.bidder === userId);
+      const engagedAuctionIds = [...new Set(myBids.map(b => b.auction))];
+      const bidderEngagedAuctions = engagedAuctionIds.length;
+      
+      const myEngagedAuctions = auctions.filter(a => engagedAuctionIds.includes(a._id));
+      if (isInitial) setWatchlist(myEngagedAuctions.slice(0, 3));
+
+      let bidderCommittedValue = 0;
+      myEngagedAuctions.forEach(a => {
+         if (a.winner === userId || a.winner?._id === userId) {
+            bidderCommittedValue += (a.currentPrice || 0);
+         }
+      });
+
       animateValue("activeAuctions", statsRef.current.activeAuctions, activeAuctions);
       animateValue("totalValue", statsRef.current.totalValue, totalValue);
       animateValue("totalBids", statsRef.current.totalBids, totalBids);
       animateValue("sellerRevenue", statsRef.current.sellerRevenue, sellerRevenue);
       animateValue("sellerAverage", statsRef.current.sellerAverage, sellerAverage);
       animateValue("sellerAuctionCount", statsRef.current.sellerAuctionCount, sellerAuctions.length);
+      animateValue("bidderEngagedAuctions", statsRef.current.bidderEngagedAuctions, bidderEngagedAuctions);
+      animateValue("bidderCommittedValue", statsRef.current.bidderCommittedValue, bidderCommittedValue);
       setStats((prev) => ({ ...prev, trend }));
 
-      // Pre-fill realistic activity and heat using recent DB history
       if (isInitial) {
          setActivityFeed(globalBids.slice(0, 24).map(b => ({
+            id: b._id || b.createdAt,
+            auctionId: b.auction,
             message: `${b.bidder?.customerId || "BG------"} placed a bid ₹${Number(b.amount).toLocaleString()} on ${b.auctionName}`,
             time: new Date(b.createdAt).getTime()
          })));
          
-         const cutOff = Date.now() - (2 * 60 * 60 * 1000); // Activity in last 2 hours
+         const cutOff = Date.now() - (2 * 60 * 60 * 1000);
          const recent = globalBids.filter(b => new Date(b.createdAt).getTime() > cutOff);
          setRecentBids(recent.map(b => new Date(b.createdAt).getTime()));
+      }
+
+      // Feature 4: Real AI/ML telemetry call for the hottest auction
+      if (auctions.length > 0) {
+        const hottest = auctions.reduce((prev, current) => {
+          const prevBids = globalBids.filter(b => b.auction === prev._id).length;
+          const currBids = globalBids.filter(b => b.auction === current._id).length;
+          return (currBids > prevBids) ? current : prev;
+        });
+        
+        try {
+          const timeRemaining = Math.max(1, (new Date(hottest.endTime).getTime() - Date.now()) / 1000);
+          const bidVel = Math.max(1, globalBids.filter(b => b.auction === hottest._id).length / timeRemaining);
+          const mlRes = await fetch("http://localhost:5001/predict-fraud", {
+             method: "POST", headers: { "Content-Type": "application/json" },
+             body: JSON.stringify({
+                current_price: hottest.currentPrice,
+                starting_price: hottest.startingPrice,
+                time_remaining: timeRemaining,
+                bid_velocity: bidVel,
+                category: hottest.category,
+                product_name: hottest.productName
+             })
+          });
+          const mlData = await mlRes.json();
+          if (mlData.fraud_probability !== undefined) {
+             setAiTelemetry({ 
+                riskScore: Math.round(mlData.fraud_probability * 100), 
+                confidence: Math.round(Math.max(45, 100 - mlData.fraud_probability * 50))
+             });
+          }
+        } catch (mlErr) { 
+           // Handled gracefully, fall back to default
+        }
       }
       
     } catch (error) {
@@ -152,7 +208,12 @@ export default function Dashboard() {
           : "-";
 
       setActivityFeed((prev) => [
-        { message: `${bidderCustomerId} placed a bid ${bidValue}`, time: Date.now() },
+        { 
+          id: Date.now().toString(), 
+          auctionId: data?.auctionId, 
+          message: `${bidderCustomerId} placed a bid ${bidValue}`, 
+          time: Date.now() 
+        },
         ...prev.slice(0, 24)
       ]);
       setRecentBids((prev) => [Date.now(), ...prev.filter((t) => Date.now() - t < 30000)]);
@@ -173,12 +234,13 @@ export default function Dashboard() {
   }, [activityFeed]);
 
   useEffect(() => {
+    if (socket.disconnected) {
+      socket.connect();
+    }
     return () => socket.disconnect();
   }, [socket]);
 
   const momentum = Math.min(stats.totalBids * 3, 100);
-  const riskScore = Math.min(100, Math.max(15, recentBids.length * 12));
-  const aiConfidence = Math.max(45, 100 - Math.min(55, recentBids.length * 6));
 
   return (
     <div className="space-y-6 text-slate-100">
@@ -186,8 +248,25 @@ export default function Dashboard() {
         title="AI Command Center"
         subtitle="Realtime bidding intelligence, risk posture, and performance telemetry."
         action={
-          <div className="rounded-xl border border-white/10 bg-[#111827] px-3 py-2 text-sm text-slate-200">
-            {user?.customerId || "BG------"}
+          <div className="flex items-center gap-3">
+            <div className="hidden sm:flex flex-col items-end justify-center rounded-xl border border-white/10 bg-[#0F172A] px-4 py-1.5 text-right">
+               <span className="text-[10px] uppercase tracking-wider text-slate-400 font-semibold">Market Vol</span>
+               <span className="text-sm font-bold text-emerald-400">{formatCurrency(stats.totalValue)}</span>
+            </div>
+            <button 
+               onClick={() => navigate("/wallet")}
+               className="flex flex-col items-end justify-center rounded-xl border border-emerald-500/20 bg-emerald-500/10 px-4 py-1.5 text-right transition-all hover:bg-emerald-500/20"
+            >
+               <span className="text-[10px] uppercase tracking-wider text-emerald-500/70 font-semibold">Funds</span>
+               <span className="text-sm font-bold text-emerald-400">{formatCurrency(user?.walletBalance)}</span>
+            </button>
+            <button 
+               onClick={() => navigate("/settings")}
+               className="flex items-center gap-2 rounded-xl border border-white/10 bg-[#111827] px-4 py-3 text-sm text-slate-200 transition-all hover:bg-white/5"
+            >
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"></path><circle cx="12" cy="7" r="4"></circle></svg>
+              <span className="hidden sm:inline">{user?.customerId || "BG------"}</span>
+            </button>
           </div>
         }
       />
@@ -198,27 +277,47 @@ export default function Dashboard() {
         </GlassCard>
       ) : (
         <>
-          <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
-            <Metric title="Active Auctions" value={formatNumber(stats.activeAuctions)} />
-            <Metric title="Total Market Volume" value={formatCurrency(stats.totalValue)} />
-            <Metric title="Total Bids" value={formatNumber(stats.totalBids)} />
-            <Metric title="Momentum Trend" value={stats.trend} />
+          <div className="grid gap-4 md:grid-cols-2">
+            <Metric 
+               title="Active Auctions" 
+               value={formatNumber(stats.activeAuctions)} 
+               onClick={() => navigate('/live')} 
+            />
+            {role !== 'seller' ? (
+               <Metric 
+                  title="My Engaged Auctions" 
+                  value={formatNumber(stats.bidderEngagedAuctions)} 
+                  onClick={() => navigate('/analytics')} 
+               />
+            ) : (
+               <Metric title="Total Bids" value={formatNumber(stats.totalBids)} />
+            )}
           </div>
 
           <div className="grid gap-6 xl:grid-cols-3">
             <GlassCard className="p-6 xl:col-span-2">
               <div className="mb-4 flex items-center justify-between">
                 <h3 className="text-lg font-semibold">Live Activity Feed</h3>
-                <span className="text-xs text-slate-400">Auto-scrolling stream</span>
+                <span className="text-xs text-slate-400">Interactive stream</span>
               </div>
               <div ref={feedRef} className="max-h-72 space-y-2 overflow-y-auto pr-1">
                 {activityFeed.length === 0 ? (
                   <p className="text-sm text-slate-400">Awaiting incoming bids...</p>
                 ) : (
                   activityFeed.map((item) => (
-                    <div key={item.time} className="rounded-xl border border-white/10 bg-[#0F172A]/70 px-3 py-2 text-sm">
-                      {item.message}
-                    </div>
+                    item.auctionId ? (
+                      <Link 
+                        key={item.id + item.time} 
+                        to={`/auction/${item.auctionId}`}
+                        className="block rounded-xl border border-white/10 bg-[#0F172A]/70 px-3 py-2 text-sm hover:bg-[#1E293B] hover:border-[#7C3AED]/50 transition-all cursor-pointer shadow-sm"
+                      >
+                        {item.message}
+                      </Link>
+                    ) : (
+                      <div key={item.id + item.time} className="rounded-xl border border-white/10 bg-[#0F172A]/70 px-3 py-2 text-sm">
+                        {item.message}
+                      </div>
+                    )
                   ))
                 )}
               </div>
@@ -233,24 +332,7 @@ export default function Dashboard() {
             </GlassCard>
           </div>
 
-          <div className="grid gap-6 xl:grid-cols-2">
-            <GlassCard className="p-6">
-              <h3 className="text-lg font-semibold">AI Risk Summary</h3>
-              <div className="mt-4 space-y-4">
-                <div>
-                  <p className="mb-2 text-sm text-slate-400">Exposure Score</p>
-                  <ConfidenceBar value={riskScore} />
-                </div>
-                <div>
-                  <p className="mb-2 text-sm text-slate-400">Model Confidence</p>
-                  <ConfidenceBar value={aiConfidence} />
-                </div>
-                <p className="text-sm text-slate-400">
-                  Risk indexing updates from live socket activity and active auction concentration.
-                </p>
-              </div>
-            </GlassCard>
-
+          <div className="grid gap-6 xl:grid-cols-1">
             {role === "seller" ? (
               <GlassCard className="p-6">
                 <h3 className="text-lg font-semibold">Seller Performance</h3>
@@ -263,10 +345,32 @@ export default function Dashboard() {
               </GlassCard>
             ) : (
               <GlassCard className="p-6">
-                <h3 className="text-lg font-semibold">Execution Note</h3>
-                <p className="mt-3 text-sm text-slate-400">
-                  Bidder mode is active. Use live auctions for AI-guided bid placement and real-time risk feedback.
-                </p>
+                <div className="flex justify-between items-center mb-4">
+                   <h3 className="text-lg font-semibold">My Watchlist</h3>
+                   <span className="text-xs text-[#7C3AED] bg-[#7C3AED]/10 px-2 py-1 rounded font-mono font-medium">Escrow Locked: {formatCurrency(stats.bidderCommittedValue)}</span>
+                </div>
+                <div className="space-y-3 mt-4">
+                   {watchlist.length === 0 ? (
+                      <p className="text-sm text-slate-400">You haven't engaged in any active auctions yet. Start bidding to track them here!</p>
+                   ) : (
+                      watchlist.map(auction => {
+                         const isWinning = auction.winner === userId || auction.winner?._id === userId;
+                         return (
+                           <div key={auction._id} onClick={() => navigate(`/auction/${auction._id}`)} className="flex justify-between items-center bg-[#0F172A]/70 rounded-xl border border-white/10 p-3 hover:border-[#7C3AED]/50 cursor-pointer transition-all shadow-sm group">
+                              <div>
+                                 <p className="text-sm font-medium text-slate-200 group-hover:text-white transition-colors line-clamp-1">{auction.productName || auction.title}</p>
+                                 <p className="text-xs font-semibold tracking-wide mt-0.5">
+                                    {isWinning ? <span className="text-emerald-400">WINNING</span> : <span className="text-rose-400">OUTBID</span>}
+                                 </p>
+                              </div>
+                              <div className="text-right ml-4">
+                                 <p className="text-sm font-bold text-white tracking-tight">₹{auction.currentPrice?.toLocaleString()}</p>
+                              </div>
+                           </div>
+                         );
+                      })
+                   )}
+                </div>
               </GlassCard>
             )}
           </div>
@@ -276,12 +380,14 @@ export default function Dashboard() {
   );
 }
 
-function Metric({ title, value }) {
+function Metric({ title, value, onClick }) {
   return (
-    <GlassCard className="p-5">
-      <p className="text-xs uppercase tracking-wide text-slate-400">{title}</p>
-      <p className="mt-2 text-2xl font-semibold">{value}</p>
-    </GlassCard>
+    <div onClick={onClick} className={onClick ? 'cursor-pointer group' : ''}>
+      <GlassCard className={`p-5 ${onClick ? 'transition-all duration-300 group-hover:border-[#7C3AED]/50 group-hover:shadow-[0_0_20px_rgba(124,58,237,0.15)]' : ''}`}>
+        <p className="text-xs uppercase tracking-wide text-slate-400 group-hover:text-slate-300 transition-colors">{title}</p>
+        <p className="mt-2 text-2xl font-semibold group-hover:text-emerald-400 transition-colors">{value}</p>
+      </GlassCard>
+    </div>
   );
 }
 
@@ -293,4 +399,5 @@ function MetricSmall({ title, value }) {
     </div>
   );
 }
+
 

@@ -19,6 +19,7 @@ import AuctionSystem from "./pages/AuctionSystem";
 
 import ProtectedRoute from "./components/ProtectedRoute";
 import RoleProtectedRoute from "./components/RoleProtectedRoute";
+import GuestRoute from "./components/GuestRoute";
 import DashboardLayout from "./components/DashboardLayout";
 
 function App() {
@@ -27,9 +28,9 @@ function App() {
       <Routes>
         <Route path="/" element={<Landing />} />
         <Route path="/home" element={<Landing />} />
-        <Route path="/login" element={<Login />} />
-        <Route path="/register" element={<Register />} />
-        <Route path="/forgot-password" element={<ForgotPassword />} />
+        <Route path="/login" element={<GuestRoute><Login /></GuestRoute>} />
+        <Route path="/register" element={<GuestRoute><Register /></GuestRoute>} />
+        <Route path="/forgot-password" element={<GuestRoute><ForgotPassword /></GuestRoute>} />
         <Route path="/terms" element={<Terms />} />
         <Route path="/auction-system" element={<AuctionSystem />} />
 

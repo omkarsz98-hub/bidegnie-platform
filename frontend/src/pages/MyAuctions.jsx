@@ -1,4 +1,4 @@
-﻿import { useEffect, useState } from "react";
+import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 
 export default function MyAuctions() {
@@ -76,7 +76,7 @@ export default function MyAuctions() {
                 <img
                   src={`http://localhost:5000${auction?.image}`}
                   alt={auction?.title || "Auction"}
-                  className="w-full h-40 object-cover rounded-xl mb-4"
+                  className="w-full h-40 object-contain bg-[#0F172A] rounded-xl mb-4"
                 />
               )}
 
